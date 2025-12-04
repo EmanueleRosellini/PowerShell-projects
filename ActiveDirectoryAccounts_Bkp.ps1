@@ -1,104 +1,74 @@
-<# 
-.SYNOPSIS
-  Export on-prem AD account data (users, groups, computers) to CSV files for backup/DR.
-
-.DESCRIPTION
-  - Connects to the local on-prem Active Directory (requires RSAT / ActiveDirectory module).
-  - Exports:
-      * All users
-      * All groups
-      * All computers
-  - Includes all attributes available through -Properties * (may be large).
-  - Writes timestamped CSVs to the specified output folder.
-
-.NOTES
-  - Run from an elevated PowerShell session with an account that can read AD.
-  - This is NOT a full AD backup (no passwords, ACLs on objects in a restorable form, 
-    SYSVOL, etc.). Use proper AD-aware backup tools for real DR.
+<#
+    Backup all AD user identities and their attributes to CSV
+    - On-prem Microsoft Active Directory
+    - Requires: RSAT / ActiveDirectory PowerShell module
 #>
 
-[CmdletBinding()]
-param(
-    # Where to store the CSV files
-    [Parameter(Mandatory = $false)]
-    [string]$OutputFolder = "C:\AD_Exports",
-
-    # Optional: domain controller to target explicitly (otherwise use default)
-    [Parameter(Mandatory = $false)]
-    [string]$Server
-)
-
-Write-Host "=== AD Export Script Started ===" -ForegroundColor Cyan
-
-# Ensure the ActiveDirectory module is available
-if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
-    Write-Error "ActiveDirectory module not found. Install RSAT / AD tools first."
+try {
+    Import-Module ActiveDirectory -ErrorAction Stop
+}
+catch {
+    Write-Error "ActiveDirectory module not found. Please install RSAT / AD PowerShell tools."
     exit 1
 }
 
-Import-Module ActiveDirectory -ErrorAction Stop
+# ==== CONFIGURATION ====
 
-# Create output directory if needed
-if (-not (Test-Path -Path $OutputFolder)) {
-    Write-Host "Creating output folder: $OutputFolder"
-    New-Item -ItemType Directory -Path $OutputFolder | Out-Null
-}
+# Optional: specify a DC (or leave $null to let AD choose automatically)
+$DomainController = $null   # e.g. "dc01.contoso.local"
 
+# Optional: search base (or leave $null for the whole domain)
+$SearchBase = $null         # e.g. "OU=Users,DC=contoso,DC=local"
+
+# Output file
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$outputCsv = ".\AD_AllUsers_FullBackup_$timestamp.csv"
 
-# Helper: build common params for AD cmdlets (allows optional Server parameter)
-$adParams = @{}
-if ($Server) {
-    Write-Host "Using domain controller: $Server"
-    $adParams["Server"] = $Server
+Write-Host "Starting full AD users backup..."
+Write-Host "This may take a while depending on domain size."
+
+# ==== BUILD SEARCH PARAMETERS ====
+
+$searchParams = @{
+    Filter        = "*"
+    Properties    = "*"       # all available attributes
+    ResultSetSize = $null     # no limit
+    Server        = $DomainController
 }
 
-### Export Users ###
+if ($SearchBase) {
+    $searchParams["SearchBase"] = $SearchBase
+}
+
+# ==== QUERY AD ====
+
 try {
-    Write-Host "Exporting AD Users..." -ForegroundColor Yellow
-
-    $usersOutputPath = Join-Path $OutputFolder "AD_Users_$timestamp.csv"
-
-    Get-ADUser @adParams -Filter * -Properties * -ResultSetSize $null |
-        Select-Object * |
-        Export-Csv -Path $usersOutputPath -NoTypeInformation -Encoding UTF8
-
-    Write-Host "Users exported to: $usersOutputPath" -ForegroundColor Green
+    $users = Get-ADUser @searchParams
 }
 catch {
-    Write-Error "Failed to export users: $_"
+    Write-Error "Failed to query Active Directory: $($_.Exception.Message)"
+    exit 1
 }
 
-### Export Groups ###
+Write-Host "Total users retrieved: $($users.Count)"
+
+if (-not $users -or $users.Count -eq 0) {
+    Write-Warning "No users found. Exiting."
+    exit 0
+}
+
+# ==== EXPORT TO CSV ====
+# Select-Object * ensures all properties on the ADUser objects are included
+
 try {
-    Write-Host "Exporting AD Groups..." -ForegroundColor Yellow
-
-    $groupsOutputPath = Join-Path $OutputFolder "AD_Groups_$timestamp.csv"
-
-    Get-ADGroup @adParams -Filter * -Properties * -ResultSetSize $null |
+    $users |
         Select-Object * |
-        Export-Csv -Path $groupsOutputPath -NoTypeInformation -Encoding UTF8
+        Export-Csv -Path $outputCsv -NoTypeInformation -Encoding UTF8
 
-    Write-Host "Groups exported to: $groupsOutputPath" -ForegroundColor Green
+    Write-Host "Backup completed successfully."
+    Write-Host "CSV saved to: $outputCsv"
 }
 catch {
-    Write-Error "Failed to export groups: $_"
+    Write-Error "Failed to export to CSV: $($_.Exception.Message)"
+    exit 1
 }
-
-### Export Computers ###
-try {
-    Write-Host "Exporting AD Computers..." -ForegroundColor Yellow
-
-    $computersOutputPath = Join-Path $OutputFolder "AD_Computers_$timestamp.csv"
-
-    Get-ADComputer @adParams -Filter * -Properties * -ResultSetSize $null |
-        Select-Object * |
-        Export-Csv -Path $computersOutputPath -NoTypeInformation -Encoding UTF8
-
-    Write-Host "Computers exported to: $computersOutputPath" -ForegroundColor Green
-}
-catch {
-    Write-Error "Failed to export computers: $_"
-}
-
-Write-Host "=== AD Export Script Completed ===" -ForegroundColor Cyan
